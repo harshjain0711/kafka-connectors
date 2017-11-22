@@ -19,4 +19,6 @@ public class JmxConstants {
 	public static final String RMI_CONNECT_TIMEOUT = "rmi.connect_timeout";
 	public static final String RMI_HANDSHAKE_TIMEOUT = "rmi.handshake_timeout";
 	public static final String RMI_RESPONSE_TIMEOUT = "rmi.response_timeout";
+	public static final String POLL_INTERVAL_MS_CONFIG="poll.interval.ms";
+	public static final String DOMAIN_WHITELIST ="jmx.domains.whitelist" ;
 }

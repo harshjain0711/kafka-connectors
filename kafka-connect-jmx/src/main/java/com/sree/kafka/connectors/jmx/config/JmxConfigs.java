@@ -38,7 +38,10 @@ public class JmxConfigs extends AbstractConfig {
 				.define(JmxConstants.JMX_FETCH_TIMEOUT, Type.LONG, 3000, Importance.LOW, "JMX fetch timeout")
 				.define(JmxConstants.RMI_CONNECT_TIMEOUT, Type.LONG, 3000, Importance.LOW, "RMI connect timeout")
 				.define(JmxConstants.RMI_HANDSHAKE_TIMEOUT, Type.LONG, 3000, Importance.LOW, "RMI handshake timeout")
-				.define(JmxConstants.RMI_RESPONSE_TIMEOUT, Type.LONG, 3000, Importance.LOW, "RMI response timeout");
+				.define(JmxConstants.RMI_RESPONSE_TIMEOUT, Type.LONG, 3000, Importance.LOW, "RMI response timeout")
+				.define(JmxConstants.DOMAIN_WHITELIST, Type.STRING, "", Importance.LOW, "Comma separated List of whitelisted domain")
+				.define(JmxConstants.POLL_INTERVAL_MS_CONFIG, Type.LONG, 5000, Importance.LOW, "Delay between Polls ");
+
 	}
 
 	public static ConfigDef config = baseConfigDef();

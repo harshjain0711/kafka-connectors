@@ -8,11 +8,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.management.MBeanServerConnection;
 import javax.management.remote.JMXConnector;
 
 import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.utils.SystemTime;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
 import org.slf4j.Logger;
@@ -25,19 +28,18 @@ import com.sree.kafka.utils.Version;
 import com.sree.kafka.utils.connect.ConnectMessageTemplate;
 
 /**
- * 
+ *
  * Kafka JMX Task which will - Establish JMX connection - Get all available
  * MBeans - Filter MBeans based on jmx.servicename - Create corresponding JSON -
  * Push the output JSON to kafka.topic
- * 
+ *
  * @author sree
- * 
- * 
+ *
+ *
  */
 
 public class JmxTask extends SourceTask {
 	private static final Logger logger = LoggerFactory.getLogger(JmxTask.class);
-	List<MBeanServerConnection> jmxServers = new ArrayList<MBeanServerConnection>();
 	BlockingQueue<ConnectMessageTemplate> jmxQueue = new LinkedBlockingQueue<ConnectMessageTemplate>();
 	JmxConfigs jmxConfig;
 	String kafkaTopic;
@@ -50,6 +52,16 @@ public class JmxTask extends SourceTask {
 	long rmiResponseTimeout;
 	String jmxService;
 	JmxClient jmxClient;
+	private long lastPollMillis;
+	private long pollIntervalMillis;
+	private Time time;
+	private AtomicBoolean stop;
+	private List<String> whiteListedDomainList;
+
+	public JmxTask(){
+		this.time = new SystemTime();
+		lastPollMillis=time.milliseconds();
+	}
 
 	/**
 	 * Get Version of the connector
@@ -65,36 +77,54 @@ public class JmxTask extends SourceTask {
 	@Override
 	public List<SourceRecord> poll() throws InterruptedException {
 		List<SourceRecord> records = new ArrayList<SourceRecord>();
-		for (MBeanServerConnection jmxConn : jmxServers) {
+
+		waitPollInterval();
+
+		//shutdown called while in sleep state
+		if(stop.get())return null;
+
+		try {
+			Set beans = null;
+			if(whiteListedDomainList.size()>0)
+				beans=jmxClient.getCompleteMbeans(whiteListedDomainList);
+			else
+				beans=jmxClient.getCompleteMbeans();
+			List<String> metricsOutput = new ArrayList<String>();
 			try {
-				Set beans = jmxClient.getCompleteMbeans(jmxConn);
-				List<String> metricsOutput = new ArrayList<String>();
-				try {
-					metricsOutput = jmxClient.getMetricsFromMbean(beans, jmxConn, jmxService);
-					for (String bean : metricsOutput) {
-						try {
-							ConnectMessageTemplate jmxMessage = new ConnectMessageTemplate();
-							jmxMessage.setMessage(bean);
-							jmxMessage.setKafkaTopic(kafkaTopic);
-							jmxQueue.add(jmxMessage);
-						} catch (Exception e) {
-							logger.error("Adding bean output to JmxMessageProcessor failed {} ", e);
-						}
+				metricsOutput = jmxClient.getMetricsFromMbean(beans, jmxService);
+				for (String bean : metricsOutput) {
+					try {
+						ConnectMessageTemplate jmxMessage = new ConnectMessageTemplate();
+						jmxMessage.setMessage(bean);
+						jmxMessage.setKafkaTopic(kafkaTopic);
+						jmxQueue.add(jmxMessage);
+					} catch (Exception e) {
+						logger.error("Adding bean output to JmxMessageProcessor failed {} ", e);
 					}
-				} catch (Exception e) {
-					logger.error("Create Metrics output exception {} ", e);
 				}
 			} catch (Exception e) {
-				logger.error("JMX bean source record creation exception {} ", e);
+				logger.error("Create Metrics output exception {} ", e);
 			}
+		} catch (Exception e) {
+			logger.error("JMX bean source record creation exception {} ", e);
 		}
 		while (!jmxQueue.isEmpty()) {
 			ConnectMessageTemplate jmxMsg = jmxQueue.poll();
 			records.add(jmxMsg.realTimeMesssageToSourceRecord());
 		}
+		lastPollMillis=time.milliseconds();
 		return records;
 	}
 
+
+	private void waitPollInterval() {
+		final long nextUpdate = lastPollMillis + pollIntervalMillis;
+		final long untilNext = nextUpdate - time.milliseconds();
+		if (untilNext > 0) {
+			logger.info("Waiting {} ms to poll next metrics snapshot", untilNext);
+			time.sleep(untilNext);
+		}
+	}
 	/**
 	 * Configuration and global variables initialization
 	 */
@@ -108,12 +138,10 @@ public class JmxTask extends SourceTask {
 		}
 		kafkaTopic = jmxConfig.getString(JmxConstants.KAFKA_TOPIC);
 		jmxService = jmxConfig.getString(JmxConstants.SERVICE);
-
-		if (jmxService.equalsIgnoreCase("kafka")) {
-			initializeKafkaJmxConnector();
-		} else {
-			initializeJmxConnector();
-		}
+		pollIntervalMillis=jmxConfig.getLong(JmxConstants.POLL_INTERVAL_MS_CONFIG);
+		whiteListedDomainList=Arrays.asList(jmxConfig.getString(JmxConstants.DOMAIN_WHITELIST).split(","));
+		initializeJmxConnector();
+		stop = new AtomicBoolean(false);
 	}
 
 	/**
@@ -122,46 +150,25 @@ public class JmxTask extends SourceTask {
 	 */
 	private void initializeJmxConnector() {
 		String jmxUrl = jmxConfig.getString(JmxConstants.JMX_URL);
-		List<String> jmxHosts = new ArrayList<String>();
-		jmxHosts = Arrays.asList(jmxUrl.trim().split(","));
-		getMBeansFromJmx(jmxHosts);
+		initializeJmxClient(jmxUrl);
 	}
 
-	/**
-	 * jmx.servicename is kafka. Initialize JMX connectivity to Kafka Get the
-	 * connection to each kafka broker
-	 */
-	private void initializeKafkaJmxConnector() {
-		String zooHost = jmxConfig.getString(JmxConstants.ZOOKEEPER_HOST);
-		List<String> kafkaBrokers = new ArrayList<String>();
-		ZookeeperClient zkClient = new ZookeeperClient();
+
+
+
+	private void initializeJmxClient(String host) {
 		try {
-			kafkaBrokers = zkClient.getKafkaHostsFromZookeeper(zooHost);
-			getMBeansFromJmx(kafkaBrokers);
+			jmxClient.configure(generateJmxURL(host),
+					generateJmxEnvironment());
+			jmxClient.initializeJmxClient();
 		} catch (Exception e) {
-			logger.error("IO Exception in Task Start {} ", e);
-		}
-	}
-
-	/**
-	 * Initialing JMX client for each kafka broker Keep it as a List of
-	 * MBeanServerConnection
-	 */
-	private void getMBeansFromJmx(List<String> hosts) {
-		for (String host : hosts) {
-			try {
-				MBeanServerConnection mBeans = jmxClient.initializeJmxClient(generateJmxURL(host),
-						generateJmxEnvironment());
-				jmxServers.add(mBeans);
-			} catch (Exception e) {
-				logger.error("JMX Client connection exception {} ", e);
-			}
+			logger.error("JMX Client connection exception {} ", e);
 		}
 	}
 
 	/**
 	 * Generate JMX URL for each kafka brokers discovered using zookeeper
-	 * 
+	 *
 	 * @return
 	 */
 	private String generateJmxURL(String kafkaBroker) {
@@ -176,7 +183,7 @@ public class JmxTask extends SourceTask {
 
 	/**
 	 * Create JMX Environment and Timeout settings
-	 * 
+	 *
 	 * @return
 	 */
 	private Map generateJmxEnvironment() {
@@ -213,6 +220,9 @@ public class JmxTask extends SourceTask {
 	 */
 	@Override
 	public void stop() {
+		if (stop != null) {
+			stop.set(true);
+		}
 		logger.info("Stopping JMX Kafka Source..");
 		jmxClient.close();
 	}

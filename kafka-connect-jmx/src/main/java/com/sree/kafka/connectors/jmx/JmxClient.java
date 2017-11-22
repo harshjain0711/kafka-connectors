@@ -2,11 +2,7 @@ package com.sree.kafka.connectors.jmx;
 
 import java.io.IOException;
 import java.net.MalformedURLException;
-import java.util.ArrayList;
-import java.util.Hashtable;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 import javax.management.MBeanAttributeInfo;
 import javax.management.MBeanInfo;
@@ -17,34 +13,44 @@ import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorFactory;
 import javax.management.remote.JMXServiceURL;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 
+ *
  * JMX Client class which can initialize connection to remote JMX Server
- * 
+ *
  * @author sree
- * 
- * 
+ *
+ *
  */
 
 public class JmxClient {
 	private static Logger logger = LoggerFactory.getLogger(JmxClient.class);
 	JMXConnector jmxConnector;
 	public MBeanServerConnection mBeanServer;
+	private String jmxUrl;
+	private Map jmxProps;
+
+
+	public void configure(String jmxUrl, Map environment){
+		this.jmxUrl=jmxUrl;
+		this.jmxProps=environment;
+	}
 
 	/**
 	 * Instantiate JMX connection
-	 * 
+	 *
 	 * @param jmxUrl
 	 * @param environment
 	 */
-	public MBeanServerConnection initializeJmxClient(String jmxUrl, Map environment) {
+	public void initializeJmxClient() {
+
 		try {
-			System.setProperty("java.rmi.server.hostname", jmxUrl.split(":")[0]);
-			jmxConnector = JMXConnectorFactory.connect(new JMXServiceURL(jmxUrl), environment);
+			System.setProperty("java.rmi.server.hostname", "localhost");
+			jmxConnector = JMXConnectorFactory.connect(new JMXServiceURL(jmxUrl), jmxProps);
 			mBeanServer = jmxConnector.getMBeanServerConnection();
 			logger.info("JMX Connection and MBean Server successfully initialized to " + jmxUrl);
 		} catch (MalformedURLException e) {
@@ -52,7 +58,12 @@ public class JmxClient {
 		} catch (IOException e) {
 			logger.error("IO Exception : ", e);
 		}
-		return mBeanServer;
+
+	}
+
+	public boolean isConnected(){
+		//TODO improve this
+		return jmxConnector!=null && mBeanServer!=null;
 	}
 
 	/**
@@ -60,84 +71,103 @@ public class JmxClient {
 	 */
 	public void close() {
 		try {
-			jmxConnector.close();
+			if(jmxConnector!=null)
+				jmxConnector.close();
+
 		} catch (IOException e) {
 			logger.error("JMX Connector closing exception  : ", e);
+		}finally {
+			jmxConnector=null;
+			mBeanServer=null;
 		}
 	}
 
 	/**
 	 * Get the complete list of beans registered in JMX
-	 * 
+	 *
 	 * @param mbeanConnection
 	 * @return
 	 */
-	public Set getCompleteMbeans(MBeanServerConnection mbeanConnection) {
-		Set beans = null;
+	public Set getCompleteMbeans() {
+		Set beans = new HashSet();
 		try {
-			beans = mbeanConnection.queryNames(null, null);
+			if(!isConnected()){
+				logger.error("Error connecting to service at {} with props  ",jmxUrl);
+				logger.info("Re connecting to service at {}",jmxUrl);
+				initializeJmxClient();
+			}
+			if(isConnected())
+				beans = mBeanServer.queryNames(null, null);
 		} catch (IOException e) {
+			close();
 			logger.error("Not able to get complete beans {} ", e);
 		}
 		return beans;
 	}
 
 	/**
-	 * Get each bean and create a JSON output which contains all the bean
-	 * parameters
-	 * 
-	 * @param beans
-	 * @param mBeanServer
+	 * Get the list of beans for white listed domains registered in JMX
+	 *
+	 * @param mbeanConnection
+	 * @param mWhiteListedDomains
 	 * @return
 	 */
-	public List<String> getMetricsFromMbean(Set beans, MBeanServerConnection mBeanServer, String serviceName) {
+	public Set getCompleteMbeans(List<String> mWhiteListedDomains) {
+		Set<ObjectName> beans = getCompleteMbeans();
+		Set<ObjectName> filteredBeans=new HashSet<>();
+		for(ObjectName objectName:beans)
+			if(mWhiteListedDomains.contains(objectName.getDomain()))filteredBeans.add(objectName);
+		return filteredBeans;
+	}
+
+
+	public List<String> getMetricsFromMbean(Set beans, String serviceName) {
 		List<String> beanList = new ArrayList<String>();
+		JSONArray jsonArray=new JSONArray();
 		for (Object obj : beans) {
 			try {
-				JSONObject bean = new JSONObject();
+				JSONObject jsonObject = new JSONObject();
 				ObjectName beanName = null;
 				if (obj instanceof ObjectName)
 					beanName = (ObjectName) obj;
 				else if (obj instanceof ObjectInstance)
 					beanName = ((ObjectInstance) obj).getObjectName();
 
-				MBeanInfo mBeanInfo = mBeanServer.getMBeanInfo(beanName);
-				if (!beanName.getDomain().contains(serviceName))
-					continue;
-
-				bean.put("metric_group", beanName.getDomain());
-				bean.put("metric_servicename", serviceName);
-				String metricNamespace = beanName.getDomain().replaceAll("\\.", "_");
+				jsonObject.put("domain", beanName.getDomain());
 				Hashtable<String, String> properties = beanName.getKeyPropertyList();
 				for (Map.Entry<String, String> prop : properties.entrySet()) {
-					if (prop.getKey().toLowerCase().equalsIgnoreCase("name")) {
-						metricNamespace = metricNamespace + "_" + prop.getValue();
-					} else
-						bean.put(String.format("metric_%s", prop.getKey().toLowerCase()), prop.getValue());
+					jsonObject.put(prop.getKey(),prop.getValue());
 				}
 
 				// Get all attributes and its values
 				try {
 					MBeanInfo beanInfo = mBeanServer.getMBeanInfo(beanName);
 					MBeanAttributeInfo[] attrInfo = beanInfo.getAttributes();
+					HashMap<String,Object> attribs=new HashMap<>();
 					for (MBeanAttributeInfo attr : attrInfo) {
 						try {
-							bean.put(metricNamespace + "_" + attr.getName(),
+							attribs.put(attr.getName(),
 									mBeanServer.getAttribute(beanName, attr.getName()).toString());
 						} catch (Exception e) {
 							logger.error("Attr parsing exception {} ", e);
 						}
 					}
+					jsonObject.put("attributes",attribs);
 				} catch (Exception e) {
 					logger.error("Get Bean attribute exception {} ", e);
 				}
-
-				beanList.add(bean.toString());
+				jsonArray.put(jsonObject);
 			} catch (Exception e) {
 				logger.error("Get Metrics From bean exception {} ", e);
 			}
 		}
-
+		JSONObject jsonObj=new JSONObject();
+		//TODO make it configurable
+		jsonObj.put("sourceType","Connect");
+		//jsonObj.put("version",1);
+		jsonObj.put("serviceName",serviceName);
+		jsonObj.put("beans",jsonArray);
+		beanList.add(jsonObj.toString());
 		return beanList;
 	}
 

@@ -42,6 +42,7 @@ public class JmxConnector extends SourceConnector {
 	public void start(Map<String, String> props) {
 		this.configProperties = props;
 		try {
+			//// TODO: 19/11/17 Handle max.tasks basis on url list
 			configs = new JmxConfigs(props);
 		} catch (ConfigException e) {
 			logger.error("Configuration Exception ", e);
@@ -66,6 +67,8 @@ public class JmxConnector extends SourceConnector {
 	 */
 	@Override
 	public List<Map<String, String>> taskConfigs(int maxTasks) {
+
+		logger.info("Maximum number of tasks :"+maxTasks);
 		List<Map<String, String>> taskConfigs = new ArrayList<Map<String, String>>();
 		Map<String, String> taskProps = new HashMap<String, String>(configProperties);
 		for (int i = 0; i < maxTasks; i++) {
