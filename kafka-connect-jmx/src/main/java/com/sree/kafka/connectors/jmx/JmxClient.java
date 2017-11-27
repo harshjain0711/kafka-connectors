@@ -1,22 +1,17 @@
 package com.sree.kafka.connectors.jmx;
 
-import java.io.IOException;
-import java.net.MalformedURLException;
-import java.util.*;
-
-import javax.management.MBeanAttributeInfo;
-import javax.management.MBeanInfo;
-import javax.management.MBeanServerConnection;
-import javax.management.ObjectInstance;
-import javax.management.ObjectName;
-import javax.management.remote.JMXConnector;
-import javax.management.remote.JMXConnectorFactory;
-import javax.management.remote.JMXServiceURL;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.management.*;
+import javax.management.remote.JMXConnector;
+import javax.management.remote.JMXConnectorFactory;
+import javax.management.remote.JMXServiceURL;
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.util.*;
 
 /**
  *
@@ -170,5 +165,8 @@ public class JmxClient {
 		beanList.add(jsonObj.toString());
 		return beanList;
 	}
+
+
+
 
 }
